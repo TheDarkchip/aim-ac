@@ -1,0 +1,148 @@
+% RL Final Project Proposal - based on the supplied ADRL template
+\documentclass{article}
+\usepackage[final]{adrl}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\urlstyle{same}
+\usepackage{booktabs}
+\usepackage{amsmath,amsfonts,amssymb,mathtools}
+\usepackage{microtype}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{float}
+\usepackage{enumitem}
+
+\title{AIM-AC: Action-Independent Magnitude Control\\for Fully Streaming Actor--Critic}
+\author{\textbf{Robin Gieseke} -- solo team \\
+Repository: \url{https://github.com/TheDarkchip/aim-ac}}
+
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\E}{\mathbb{E}}
+
+\begin{document}
+\maketitle
+
+\section{Motivation}
+Fully streaming reinforcement learning (RL) performs an update immediately after every transition, without replay or minibatches. This is attractive when memory, latency, or data reuse are constrained, but a single correlated sample can also produce an unstable policy step. Recent \emph{intentional updates} address this problem by choosing step sizes in units of function change rather than parameter change. Their actor normalizer, however, depends on the sampled action and can therefore reweight actions inside the policy-gradient expectation~\citep{sharifnassab2026intentional}. This project asks whether a state-local normalizer computed from \emph{all} discrete actions can remove that distortion while retaining predictable one-transition policy changes. The question targets an explicit open problem and admits both an exact mechanistic test and inexpensive, reproducible control experiments.
+
+\section{Related Topics and Novelty Audit}
+The project builds on temporal-difference learning, likelihood-ratio policy gradients, and actor--critic methods: after observing one transition, a TD error supplies the actor's learning signal and the critic is updated incrementally. Fully incremental deep policy-gradient methods have recently been made practical through normalization, scaling, and careful initialization~\citep{vasan2024deep,elsayed2024streaming}. Sharifnassab et al.~\citep{sharifnassab2026intentional} subsequently proposed Intentional Policy Gradient, but explicitly identify current-action-dependent normalization as a possible source of policy-gradient bias and call for a step size that is action-independent (state-dependent at most).
+
+Expected- and many-action policy-gradient estimators integrate or sample several action contributions to reduce estimator variance~\citep{ciosek2020expected,nauman2023manyactions}. Trust-region methods instead control a distribution-level policy change, usually from batches and an empirical state distribution~\citep{schulman2015trpo}. AIM-AC uses all actions for a different purpose: at the \emph{single current state}, it constructs one common sensitivity scalar, while the reward/TD signal still comes from exactly one environment transition.
+
+For novelty diligence, on 12 July 2026 I searched arXiv, OpenReview, PMLR, and Google Scholar for combinations of ``streaming policy gradient,'' ``action-independent step size,'' ``all-action score norm,'' ``state-only normalization,'' and ``intentional policy update,'' and followed backward/forward citations from the closest papers above. I found no published method combining (i) a strict one-transition actor--critic update, (ii) a current-action-independent scalar formed from all action-score cross-sensitivities, and (iii) an exact diagnostic of the sampled-normalizer direction reversal studied here. This is a best-effort novelty assessment, not proof that no unpublished or differently named equivalent exists.
+
+\section{Idea}
+Let $\pi_\theta$ be a categorical policy and let
+\begin{equation}
+    g_b(s) \coloneqq \nabla_\theta \log \pi_\theta(b\mid s)
+\end{equation}
+be the score vector for action $b$. The protocol is strict: observe one transition, make at most one actor and one critic update, and discard it. Computing scores for all discrete actions queries only the policy at the already observed state and requires no additional environment samples.
+
+After observing $(s_t,a_t,r_t,s_{t+1})$, the critic produces
+\begin{equation}
+    \delta_t = r_t + \gamma(1-d_t)V_\phi(s_{t+1})-V_\phi(s_t),
+    \qquad
+    \widehat A_t = \clip\!\left(\frac{\delta_t}{m_{t-1}+\varepsilon},-1,1\right),
+\end{equation}
+where $d_t$ marks termination and $m_{t-1}$ is a lagged running TD-error scale. The same scaling and clipping will be applied to every compared actor, so it is not part of the proposed contribution. Let $P_{t-1}$ be either the identity or a positive diagonal preconditioner formed only from \emph{past} gradients. At the current state, define the all-action score-Gram matrix
+\begin{equation}
+    H_{ba}(s_t) \coloneqq g_b(s_t)^\top P_{t-1}g_a(s_t).
+\end{equation}
+I will investigate two current-action-independent normalizers:
+\begin{align}
+    c_{\mathrm{rms}}(s_t)
+    &= \left(\sum_a\pi_\theta(a\mid s_t)\sum_b\pi_\theta(b\mid s_t)H_{ba}(s_t)^2\right)^{1/2}+\varepsilon, \\
+    c_{\max}(s_t)
+    &= \max_{a,b}\lvert H_{ba}(s_t)\rvert+\varepsilon.
+\end{align}
+The actor update is
+\begin{equation}
+    \theta_{t+1}=\theta_t+
+    \eta\,\widehat A_t\,
+    \frac{P_{t-1}g_{a_t}(s_t)}{c(s_t)}.
+    \label{eq:aim-update}
+\end{equation}
+Only after this update are the running statistics changed. Thus $c(s_t)$, $m_{t-1}$, and $P_{t-1}$ cannot depend on the current sampled action through update order.
+
+\begin{algorithm}[H]
+    \caption{One transition of AIM-AC (actor side; $\lambda=0$ in the core study)}
+    \label{alg:aim}
+    \small
+    \begin{algorithmic}[1]
+        \Require policy $\pi_\theta$, critic $V_\phi$, intended scale $\eta$, lagged statistics $(m_{t-1},P_{t-1})$
+        \State Observe exactly one transition $(s_t,a_t,r_t,s_{t+1},d_t)$
+        \State Compute $\delta_t$, $\widehat A_t$, and every $g_b(s_t)$ using pre-update quantities
+        \State Form $H_{ba}$; choose $c_{\mathrm{rms}}$ or $c_{\max}$; apply Equation~\ref{eq:aim-update}
+        \State Update the critic once; then update $m_t,P_t$; discard the transition
+    \end{algorithmic}
+\end{algorithm}
+
+\paragraph{Expected-direction property.}
+Conditioned on the current state and pre-update history $\mathcal H_t$, the scalar $c(s_t)$ is common to every possible current action. Therefore
+\begin{equation}
+\E[\Delta\theta_t\mid s_t,\mathcal H_t]
+=\frac{\eta}{c(s_t)}P_{t-1}
+\E_{a\sim\pi_\theta}[\widehat A(s_t,a)g_a(s_t)].
+\label{eq:direction}
+\end{equation}
+AIM-AC consequently introduces no \emph{additional} current-action reweighting beyond the chosen advantage estimator; with $P_{t-1}=I$, it preserves that estimator's conditional expected direction exactly. This claim does not remove critic bias or state-dependent weighting.
+
+\paragraph{Policy-change property.}
+For $c_{\max}$, a first-order expansion gives, for every output action $b$,
+\begin{equation}
+\left|\Delta\log\pi_\theta(b\mid s_t)\right|
+\approx \eta |\widehat A_t|
+\frac{|H_{b a_t}(s_t)|}{c_{\max}(s_t)} \leq \eta.
+\label{eq:bound}
+\end{equation}
+Thus one scalar controls all local action log-probabilities for any sampled action. The RMS variant is less conservative and normalizes the policy-weighted mean squared sensitivity.
+
+\paragraph{Analytical diagnostic.}
+The mechanism is visible in a two-action softmax bandit. Let action 1 have probability $p$ and rewards satisfy $R_1>R_2>0$ (equivalently, an early actor--critic with $V\approx0$). A standard expected logit-difference update is proportional to $p(1-p)(R_1-R_2)>0$. Normalizing each sample by its own score norm instead yields an expectation proportional to
+\begin{equation}
+    \frac{pR_1}{1-p}-\frac{(1-p)R_2}{p},
+\end{equation}
+which is negative whenever $p^2R_1<(1-p)^2R_2$. AIM-AC multiplies the standard expectation by one common state-dependent scalar, so it cannot create this sign reversal. A three-action, two-context extension will additionally measure non-trivial angular distortion rather than only the sign.
+
+\section{Experiments}
+\paragraph{Research questions and hypotheses.}
+The primary question is whether removing current-action-dependent normalization preserves useful policy-change control in strict streaming learning. I expect (H1) AIM-AC to match the reference expected direction in the exact diagnostics, while sampled-action normalization can become anti-aligned; (H2) AIM-Max to produce the fewest extreme policy jumps and failed seeds; and (H3) AIM-RMS to learn faster than AIM-Max while remaining more stable than fixed-step streaming actor--critic.
+
+\paragraph{Environments, comparisons, and metrics.}
+The diagnostic suite will sweep initial action probabilities, reward ratios, critic offsets, and intended update scales in the two-action bandit and three-action contextual bandit, where conditional expected updates can be enumerated exactly. Neural experiments will use \texttt{CartPole-v1}, \texttt{Acrobot-v1}, and \texttt{MountainCar-v0}; their two or three discrete actions make exact all-action score computation affordable and avoid confounding the study with pixels or expensive simulation. Every method will use one transition, one actor update, and one critic update per environment step, with no replay buffer, rollout batch, or repeated data pass.
+
+The main comparisons are: (i) fixed-step streaming TD(0) actor--critic, (ii) sampled-action Intentional Actor--Critic, (iii) AIM-RMS, and (iv) AIM-Max. The critic, MLP architecture, observation normalization, TD scaling, and seeds will be shared. I will report return versus environment transitions, learning-curve area, final median return with 95\% bootstrap intervals, seed failure rate, exact gradient-direction cosine/sign on the diagnostics, local state-conditional KL, maximum $|\Delta\log\pi|$, bound violations, sensitivity imbalance, and wall-clock overhead.
+
+\paragraph{Experimental scope and ablations.}
+The main study will run 15 seeds for each of four methods on three environments (180 runs), for at most $2.5\times10^5$ transitions per run. Before the main run, every method receives the same small, predeclared, logarithmic step-size grid on each environment (three pilot seeds and shorter budgets); the selected settings are then frozen. Ablations on the exact diagnostics and \texttt{Acrobot-v1} with 10 seeds will compare (a) RMS versus maximum sensitivity, (b) identity versus lagged diagonal preconditioning, and (c) correct lagged statistics versus updating statistics with the current sample. The last ablation directly tests whether a subtle implementation-order choice reintroduces action dependence.
+
+\paragraph{Reproducibility and computational load.}
+All configurations, seeds, package versions, raw learning curves, per-update diagnostics, and final weights will be saved. Unit tests will verify Equation~\ref{eq:direction} by enumerating actions, check Equation~\ref{eq:bound} for sufficiently small steps, and audit that each transition is used exactly once. The repository will clearly separate borrowed baseline code from my contribution. The main study contains at most 45 million inexpensive classic-control transitions. Including equal-budget pilots and ablations, I estimate 75--150 CPU-hours, parallelizable across 8--16 workers into roughly one to two days; no GPU or replay-memory allocation is required. If profiling exceeds this budget, the fixed contingency is to reduce each control run to $1.5\times10^5$ transitions while preserving the seed count and all exact diagnostics.
+
+\section{Timeline}
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.14\linewidth}p{0.78\linewidth}@{}}
+\toprule
+\textbf{Days} & \textbf{Work and deliverable} \\
+\midrule
+1--2 & Final literature audit; reproduce the streaming and sampled-action intentional baselines; lock the strict online protocol. \\
+3--4 & Implement the exact bandit diagnostics and derive/verify the sign-reversal region and expected-direction property. \\
+5--7 & Implement AIM-RMS and AIM-Max, lagged statistics, unit tests, and per-update policy diagnostics. \\
+8 & Run equal-budget pilot sweeps, profile runtime, and freeze the main configurations. \\
+9--11 & Run all main seeds on the three control environments; preserve raw outputs and investigate failures without changing the frozen protocol. \\
+12 & Run ablations and bootstrap analysis; generate final plots. \\
+13 & Write the report and design the poster around the mechanism, guarantee, and empirical trade-off. \\
+14 & Reproducibility audit from a clean checkout; finalize code documentation, citations, report, and poster. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\bibliography{references}
+\bibliographystyle{plainnat}
+
+\end{document}
