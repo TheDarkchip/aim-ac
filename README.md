@@ -26,5 +26,5 @@ cross-action sensitivity for a more conservative local bound. Exact bandit
 diagnostics and discrete-action classic-control experiments are proposed to
 compare their direction preservation, stability, learning speed, and overhead.
 
-See [`latex/proposal.tex`](latex/proposal.tex) for the complete formulation,
-analysis, experimental plan, and references.
+See the compiled [`proposal.pdf`](output/pdf/proposal.pdf) for the complete
+formulation, analysis, experimental plan, and references.
